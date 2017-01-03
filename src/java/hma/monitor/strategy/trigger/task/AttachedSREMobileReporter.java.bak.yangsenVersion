@@ -1,0 +1,293 @@
+/**
+ *
+ */
+package hma.monitor.strategy.trigger.task;
+
+import hma.conf.Configuration;
+import hma.monitor.MonitorManager;
+import hma.util.EasyWebGet;
+import hma.web.HMAJspHelper;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import java.io.IOException;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.ResultSet;
+import java.sql.Statement;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+
+/**
+ * @author guoyezhi
+ */
+public class AttachedSREMobileReporter extends MonitorStrategyAttachedTask {
+
+    private String[] servers = null;
+
+    private String hmaGSMsend = null;
+
+    private static SimpleDateFormat dateFormat =
+            new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+
+    public static final Log LOG = LogFactory
+            .getLog(AttachedSREMobileReporter.class);
+
+    /**
+     * @param taskWorker
+     * @param workerArgs
+     * @param args
+     */
+    public AttachedSREMobileReporter(String taskWorker, String[] workerArgs,
+                                     MonitorStrategyAttachedTaskArguments args) {
+        super(taskWorker, workerArgs, args);
+        this.servers =
+                MonitorManager.getGlobalConf().getStrings("baidu.gsm.servers");
+        this.hmaGSMsend =
+                System.getProperty("hma.home.dir") + "/conf/" +
+                        MonitorManager.getMonitoredClusterName() + "/gsmsend.hma";
+    }
+
+   private void doSendTg ( String [ ] receivers, String message,String channel) {
+         // test  receiverlist
+        String receiverlist="" ;
+        for (int i =0; i < receivers.length; i++){
+            receiverlist = receiverlist +";"+receivers[i].trim();
+        }
+      //  receiverlist="masuhua;hadoop-mon@baidu.com";
+        //receiverlist="masuhua;dpf-op@baidu.com;#z_dpf_mon;z_60613";
+        message = message+"[Tg]"; 
+        SimpleDateFormat dotime =
+                new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+        try{
+            String url = "http://jingle.baidu.com/alert/push";
+            String params="{"+
+                    "\"appId\":\"620\","+
+                    "\"token\":\"551256bc833bd8d80f3c9869\","+
+                    "\"alertList\":{"+     "\"receiver\":\""+ receiverlist +"\","+    "\"channel\":\""+ channel +"\","+    "\"title\":\"HMA报警\","+    "\"description\":\""+ message +"\""+ "}"+
+                    "}";
+            EasyWebGet.post(url, params);
+            System.out.println("[INFO ] http://jingle.baidu.com/alert/push done ! "+ params + dotime);
+        }catch(Exception e){
+
+            System.out.println("[ERROR ] http://jingle.baidu.com/alert/push   error  ! " +dotime);
+            e.printStackTrace();
+        }
+
+    }
+
+    private void doSendSM(String[] receivers, String message) {
+
+        Runtime rt = Runtime.getRuntime();
+
+        if (MonitorManager.isAlarm() == false) {
+            System.out.println("Oops..." + message + ", monitor is shutdown ...");
+            return;
+        }
+
+        for (int i = 0; i < receivers.length; i++) {
+
+            String[] gsmsendComm = new String[3 + 2 * servers.length];
+            gsmsendComm[0] = "gsmsend";
+            for (int j = 0; j < servers.length; j++) {
+                gsmsendComm[1 + 2 * j] = "-s";
+                gsmsendComm[2 + 2 * j] = servers[j].trim();
+            }
+            gsmsendComm[1 + 2 * servers.length] = receivers[i].trim();
+            gsmsendComm[2 + 2 * servers.length] = message;
+
+            for (String str : gsmsendComm) {
+                System.out.print(str + " ");
+            }
+            System.out.println();
+
+            gsmsendComm[0] = hmaGSMsend;
+            try {
+                rt.exec(gsmsendComm);
+                LOG.info("[gsm] send [" + message + "] to " + receivers[i]);
+            } catch (IOException ioe) {
+                ioe.printStackTrace();
+            }
+
+        }
+    }
+
+    /* (non-Javadoc)
+     * @see java.lang.Runnable#run()
+     */
+    @Override
+    public void run() {
+
+        MonitorStrategyAttachedTaskArguments taskArgs =
+                getAttachedTaskArguments();
+        String monitorStrategyName =
+                taskArgs.getMonitorStrategyName();
+        String alarmLevel = taskArgs.getAlarmLevel();
+
+        Configuration conf = MonitorManager.getGlobalConf();
+        String alarmThres = conf.get(
+                "mobile.reporter.alarm.level.threshold",
+                "NOTICE");
+
+        if (MonitorStrategyAttachedTaskAdapter.compareAlarmLevel(
+                alarmLevel, alarmThres) <= 0) {
+            return;
+        }
+        /**Begain add by chiwen01 temporary, will remove before 2015.1.1*/
+        String Mon_name = HMAJspHelper.getMonitorStrategyAlias(monitorStrategyName);
+        SimpleDateFormat justHour = new SimpleDateFormat("HH");
+        int forbiddenStartTime = 18;
+        int forbiddenEndTime = 10;
+	boolean overDay = false;
+        int thisTime = Integer.parseInt(justHour.format(new Date()));
+        if (forbiddenEndTime - forbiddenStartTime < 0) {
+		overDay = true;
+	}
+        if ((Mon_name.toLowerCase()).equals("unworkingdatanodes")) {
+                if (thisTime > forbiddenStartTime && thisTime < forbiddenEndTime && !overDay) {
+	        	System.out.println("[INFO] "+dateFormat.format(taskArgs.getTimestamp())+" The strategy: "+Mon_name+" forbiden > " + forbiddenStartTime + " && < "+forbiddenEndTime);
+            	return;
+		} else if (!(thisTime < forbiddenStartTime && thisTime > forbiddenEndTime) && overDay) {
+	        	System.out.println("[INFO] "+dateFormat.format(taskArgs.getTimestamp())+" The strategy: "+Mon_name+" forbiden > " + forbiddenStartTime + " && < "+forbiddenEndTime);
+			return;
+		}
+        }
+        /**End add by chiwen01 temporary, will remove before 2015.1.1*/
+
+        String alarmTag = getAlarmTag(monitorStrategyName, alarmLevel);
+        String[] receivers = getReceivers(alarmLevel, conf);
+
+        StringBuilder msgBuilder = new StringBuilder();
+        msgBuilder.append("[HMA]");
+        msgBuilder.append("[" + taskArgs.getTargetSystemName() + "]");
+        msgBuilder.append("[" + alarmTag + "]");
+        msgBuilder.append("[" + HMAJspHelper.getMonitorStrategyAlias(monitorStrategyName) + "]");
+        msgBuilder.append("[" + taskArgs.getKeyInfo() + "]");
+        msgBuilder.append("[" + dateFormat.format(taskArgs.getTimestamp()) + "]");
+
+    	/*
+     	 * add by yangsen01
+     	 * for check if the Strategy is blocked.
+     	 */
+        if (false == checkStrategyBlock(taskArgs.getTargetSystemName(),monitorStrategyName))
+        {
+        	//gsmsend
+	        doSendSM(receivers, msgBuilder.toString());
+	        doSendTg(receivers, msgBuilder.toString(),"email");
+
+                if ( taskArgs.getTargetSystemName().toString().equals("SZWG-STOFF") || taskArgs.getTargetSystemName().toString().equals("NJ01-YULONG") || taskArgs.getTargetSystemName().toString().equals("NMG01-MULAN") ){
+                     doSendTg(receivers, msgBuilder.toString(),"sms"); 
+                     System.out.println(" sendtg  success  ok !");
+                }
+			
+	     	/*
+	     	 * add by yangsen01
+	     	 * for Hermes.  important alerm should call 
+	     	 */
+                try{
+	        String url = "http://jingle.baidu.com/EIPCommunicator/pushIncident";
+	        String params="alertJson={"+
+	                "\"appId\":\"620\","+
+	                "\"token\":\"551256bc833bd8d80f3c9869\","+
+	                "\"smsReceiver\":\"yangsen01\","+
+	                "\"details\":\""+ msgBuilder.toString() +"\","+
+	                "\"nodeId\":\"100030575\","+
+	                "\"nodeName\":\"BAIDU_INF_HADOOP\""+
+	                "}";
+	        EasyWebGet.post(url, params);
+                System.out.println("[INFO ] EIPCommunicator  pushIncident done ! "+ params + dateFormat.format(taskArgs.getTimestamp()));
+            }catch(Exception e){
+
+               System.out.println("[ERROR ] EIPCommunicator  pushIncident error  ! "+ dateFormat.format(taskArgs.getTimestamp()));
+               e.printStackTrace();
+            }
+        }
+        else {
+        	System.out.println("[INFO] "+dateFormat.format(taskArgs.getTimestamp())+" The strategy: "+monitorStrategyName+" of the cluster: "+taskArgs.getTargetSystemName()+"is blocked!");
+	}
+    }
+    
+    /*
+ 	 * add by yangsen01
+ 	 * for check if the Strategy is blocked.
+ 	 */
+    public boolean checkStrategyBlock(String cluster,String monitorStrategyName) {
+
+		boolean isBlock=false;
+		try{
+			
+            String url="jdbc:mysql://hma.db.dmop.baidu.com:3306/hma";    //JDBC connection string
+            Connection conn;
+
+            conn = DriverManager.getConnection(url,"root","hmainit");
+            Statement stmt = conn.createStatement(); 
+          
+            String sql = "select shield_status from monitor_hadoop_shield where cluster_name='"+cluster+"' and strategy_name='"+monitorStrategyName+"';";   //get block status SQL
+            ResultSet rs = stmt.executeQuery(sql);
+                if (rs.next()) {
+                	System.out.println(rs.getInt(1));
+                    if(1 == rs.getInt(1))
+                    	isBlock=true;
+                }
+                rs.close();
+                stmt.close();
+                conn.close();
+                
+                return isBlock; 
+            }catch(Exception e)
+            {
+            	System.out.println("[WARN] Check Strategy block status ERROR!");
+                e.printStackTrace();
+               
+                return false; 
+            }
+    	
+	}
+
+    private String getAlarmTag(String monitorStrategyName, String alarmLevel) {
+        String alarmTag = null;
+        if (monitorStrategyName.equals("INode Quota") ||
+                monitorStrategyName.equals("Space Quota")) {
+            alarmTag = alarmLevel;
+        } else {
+            if (MonitorStrategyAttachedTaskAdapter.compareAlarmLevel(
+                    alarmLevel, "WARN") == 0) {
+                alarmTag = "一线处理";
+            } else if (MonitorStrategyAttachedTaskAdapter.compareAlarmLevel(
+                    alarmLevel, "CRITICAL") >= 0) {
+                alarmTag = "二线处理";
+            } else {
+                alarmTag = "二线处理";
+            }
+        }
+        return alarmTag;
+    }
+
+    private String[] getReceivers(String infoLevel, Configuration conf) {
+        /*
+            优先选择监控策略报警接受者，如无，则选择默认配置
+         */
+        String[] receivers = getWorkerArgs();
+        if (receivers != null) {
+            System.out.println("Receiver ：" + receivers);
+            return receivers;
+        }
+
+        System.out.println("### Used default receiver");
+
+        if (MonitorStrategyAttachedTaskAdapter.compareAlarmLevel(
+                infoLevel, "WARN") == 0) {
+            receivers = conf.getStrings(
+                    "sre.mobile.reporter.warning.level.alarm.receivers");
+        } else if (MonitorStrategyAttachedTaskAdapter.compareAlarmLevel(
+                infoLevel, "CRITICAL") >= 0) {
+            receivers = conf.getStrings(
+                    "sre.mobile.reporter.critical.level.alarm.receivers");
+        } else {
+            receivers = getWorkerArgs();
+        }
+        return receivers;
+    }
+
+}

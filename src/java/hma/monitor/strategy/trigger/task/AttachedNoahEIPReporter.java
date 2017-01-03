@@ -1,0 +1,227 @@
+/**
+ * 
+ */
+package hma.monitor.strategy.trigger.task;
+
+import hma.conf.Configuration;
+import hma.monitor.MonitorManager;
+import hma.util.HttpClientHelper;
+
+import java.io.IOException;
+import java.io.UnsupportedEncodingException;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.Map;
+
+import org.apache.http.client.ClientProtocolException;
+
+/**
+ * @author guoyezhi
+ *
+ */
+public class AttachedNoahEIPReporter extends MonitorStrategyAttachedTask {
+	
+	private static SimpleDateFormat dateFormat =
+		new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+	
+	private Map<String, Integer> noahNodeIDMap = null;
+	
+	/**
+	 * @param taskWorker
+	 * @param workerArgs
+	 * @param args
+	 */
+	public AttachedNoahEIPReporter(
+			String taskWorker,
+			String[] workerArgs,
+			MonitorStrategyAttachedTaskArguments args) {
+		super(taskWorker, workerArgs, args);
+		this.noahNodeIDMap = initNoahNodeIDMap();
+	}
+	
+	private Map<String, Integer> initNoahNodeIDMap() {
+		noahNodeIDMap = new HashMap<String, Integer>();
+		
+		// TODO: update automatically in future
+		noahNodeIDMap.put("BAIDU_INF_HADOOP_JP",         13350);
+		
+		
+		// http://tc-oped-dev03.tc.baidu.com:8110/service-tree/v1/node/path_BAIDU_INF_HADOOP_SZWG-ECOMOFF
+		noahNodeIDMap.put("BAIDU_INF_HADOOP_SZWG-CH",    23863);
+		noahNodeIDMap.put("BAIDU_INF_HADOOP_SZWG-STON",    20709);
+		
+		noahNodeIDMap.put("BAIDU_INF_HADOOP_SZWG-STOFF",   20704);
+		
+		noahNodeIDMap.put("BAIDU_INF_HADOOP_SZWG-ECOMON",  20703);
+		
+		noahNodeIDMap.put("BAIDU_INF_HADOOP_SZWG-ECOMRT",  21745);
+        
+		noahNodeIDMap.put("BAIDU_INF_HADOOP_SZWG-KUN",   30785);
+		
+        noahNodeIDMap.put("BAIDU_INF_HADOOP_HY-ECOMOFF", 20934);
+		noahNodeIDMap.put("BAIDU_INF_HADOOP_SZWG-ECOMOFF", 37407);
+		
+		noahNodeIDMap.put("BAIDU_INF_HADOOP_SZWG-RANK", 32026);
+		
+		noahNodeIDMap.put("BAIDU_INF_HADOOP_NJ01-YULONG", 200002459);
+		
+		noahNodeIDMap.put("BAIDU_INF_HADOOP_NJ01-NANLING", 200002291);
+		
+		
+		noahNodeIDMap.put("BAIDU_INF_HADOOP_SZWG-DAYU", 200003292);
+		
+		return noahNodeIDMap;
+	}
+	
+	/* (non-Javadoc)
+	 * @see java.lang.Runnable#run()
+	 */
+	@Override
+	public void run() {
+		
+		Configuration conf = MonitorManager.getGlobalConf();
+		MonitorStrategyAttachedTaskArguments taskArgs =
+			getAttachedTaskArguments();
+		
+		String alarmLevel = taskArgs.getAlarmLevel();
+		if (alarmLevel.equals("INFO")) {
+			// Report of `Info' level should not be sent!
+			return;
+		}
+		
+		// translate HMA alarm level into EIP urgency
+		Integer urgency = translateAlarmLevelIntoEIPUrgency(alarmLevel);
+		
+		/*
+		 * 1：IFC
+		 * 2: Mizar
+		 * 3: Distributed Monitor
+		 */
+		Integer origin = 3;
+		
+		String clusterName = taskArgs.getTargetSystemName();
+		
+		String nodePath = getNoahNodePath(clusterName, conf);
+		Integer nodeId = noahNodeIDMap.get(nodePath);
+		if (nodeId == null) {
+			nodePath = getNoahNodePath2(clusterName, conf);
+			nodeId = noahNodeIDMap.get(nodePath);
+			if (nodeId == null) {
+				throw new RuntimeException(
+						"Cluster \"" + clusterName + "\" is not a Noah Service Node!");
+			}
+		}
+		
+		String title = 
+			"[HMA]" + 
+			"[" + clusterName.toUpperCase() + "]" + 
+			"[" + taskArgs.getMonitorStrategyName() + "]" + 
+			"[" + taskArgs.getKeyInfo() + "]";
+		
+		String ruleName = taskArgs.getMonitorStrategyName();
+		Integer ruleId = ruleName.hashCode();
+		
+		String[] receivers = getWorkerArgs();
+		String receiverList = "";
+		for (String receiver : receivers) {
+			receiverList = receiverList + receiver + ";";
+		}
+		
+		String alarmedAt = dateFormat.format(taskArgs.getTimestamp());
+		String hostname = "hma.dmop.baidu.com";
+		
+		String info = taskArgs.getFullInfo();
+		
+		// setup url
+		String url = conf.get(
+				"noah.eip.url",
+				"http://noah.baidu.com/eip/event/extImportor.do");
+		Map<String, String> params = new HashMap<String, String>();
+		params.put("origin", origin.toString());
+		params.put("title", title);
+		params.put("ruleId", ruleId.toString());
+		params.put("ruleName", ruleName);
+		params.put("nodeId", nodeId.toString());
+		params.put("nodeName", nodePath);
+		params.put("alarmedAt", alarmedAt);
+		params.put("urgency", urgency.toString());
+		params.put("receiver", receiverList);
+		params.put("info", info);
+		params.put("hostname", hostname);
+		
+		// send report
+		String rspContent = null;
+		try {
+			rspContent = HttpClientHelper.postRequest(url, params, "utf-8");
+		} catch (UnsupportedEncodingException e) {
+			e.printStackTrace();
+			throw new RuntimeException(e);
+		} catch (ClientProtocolException e) {
+			e.printStackTrace();
+		} catch (IOException e) {
+			e.printStackTrace();
+		}
+		
+		if (rspContent != null) {
+			System.out.println(rspContent);
+		}
+		
+	}
+	
+	private String getNoahNodePath(String clusterName, Configuration conf) {
+		String nodeName = clusterName.toUpperCase();
+		if (nodeName.startsWith("WG-")) {
+			nodeName = nodeName.replaceFirst("WG-", "SZWG-");
+		}
+		String nodePath = conf.get(
+				"noah.dmop.hadoop.service.node.prefix", 
+				"BAIDU_INF_HADOOP_") + nodeName;
+		return nodePath;
+	}
+	
+	private String getNoahNodePath2(String clusterName, Configuration conf) {
+		String nodeName = clusterName.toUpperCase();
+		String nodePath = conf.get(
+				"noah.dmop.hadoop.service.node.prefix", 
+				"BAIDU_INF_DPF_HADOOP_") + nodeName;
+		return nodePath;
+	}
+	
+	private int translateAlarmLevelIntoEIPUrgency(String alarmLevel) {
+		int urgency = 0;
+		if (alarmLevel.equals("EMERG") 
+				|| alarmLevel.equals("CRITICAL")) {
+			urgency = 1;
+		} else if (alarmLevel.equals("WARN") 
+				|| alarmLevel.equals("WARNING")) {
+			urgency = 2;
+		} else if (alarmLevel.equals("NOTICE")) {
+			urgency = 3;
+		} else if (alarmLevel.equals("INFO")) {
+			urgency = 4;
+		} else {
+			urgency = 5;
+		}
+		return urgency;
+	}
+	
+	
+	/**
+	 * for unit testing
+	 * 
+	 * @param args
+	 * @throws InterruptedException
+	 */
+	public static void main(String[] args) throws InterruptedException {
+		String[] workerArgs = 
+			new String[]{ "g_dmop_hadoop_lungang" };
+		MonitorStrategyAttachedTaskArguments taskArgs = 
+			new MonitorStrategyAttachedTaskArguments(
+					"SZWG-STON", "Test Strategy", "NOTICE", "Test Key Info", 
+					"Test Full Info", new Date());
+		new AttachedNoahEIPReporter(null, workerArgs, taskArgs).run();
+	}
+	
+}
+
